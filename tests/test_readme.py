@@ -12,3 +12,11 @@ def test_readme_cli_flags_exist():
     help_text = subprocess.run([sys.executable, str(ROOT / "fdi_qol.py"), "--help"],
                                capture_output=True, text=True, check=True).stdout
     assert used and all(flag in help_text for flag in used)
+
+
+def test_demo_does_not_touch_real_panel():
+    panel = ROOT / "data" / "panel.csv"
+    before = panel.read_bytes() if panel.exists() else None
+    subprocess.run([sys.executable, str(ROOT / "fdi_qol.py"), "--demo"], check=True, capture_output=True)
+    assert (panel.read_bytes() if panel.exists() else None) == before
+    assert (ROOT / "data" / "panel_demo.csv").exists()

@@ -116,6 +116,8 @@ def worldbank(ind):
         if page >= js[0]["pages"]:
             break
         page += 1
+    if not rows:
+        raise RuntimeError(f"World Bank returned no data for {ind}")
     return pd.DataFrame(rows)
 
 
@@ -176,11 +178,18 @@ def build_demo():
     d = pd.DataFrame(rows, columns=["iso2", "fdi", "inc", "sat", "pop"])
     mk = lambda c: pd.DataFrame({"iso2": d.iso2, "year": 2023, "value": d[c]})
     fdi = pd.concat([mk("fdi").assign(year=y) for y in range(2019, 2024)])
+    # make two countries stale so the demo exercises the grey path
+    fdi = fdi[~((fdi.iso2 == "GB") & (fdi.year > 2019)) & ~((fdi.iso2 == "ME") & (fdi.year != 2020))]
     return mk("inc"), mk("sat"), fdi, mk("pop"), "SYNTHETIC DEMO FDI"
 
 
 def make_panel(income, sat, fdi, pop):
+    fdi = fdi[np.isfinite(fdi["value"])]  # NaN/inf (e.g. GDP 0) must not count as a data point
+    if fdi.empty:
+        raise RuntimeError("FDI series is empty after dropping missing values")
     latest_year = fdi.year.max()
+    print(f"FDI feed newest year: {latest_year} (countries not reaching {FDI_MIN_POINTS} points since "
+          f"{latest_year - FDI_YEARS + 1} are grey)")
     fdi = fdi.sort_values("year").groupby("iso2").tail(FDI_YEARS)
     fdi = fdi.assign(recent=fdi.year > latest_year - FDI_YEARS)
     f = fdi.groupby("iso2").agg(fdi=("value", "mean"), fdi_years=("year", "nunique"),

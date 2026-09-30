@@ -74,3 +74,34 @@ def test_gap_before_recent_run_is_ok():
 def test_mostly_old_points_with_one_recent_is_not_ok():
     # Austria-like: 2016-2019 plus 2024. Average mixes a decade apart.
     assert not _panel(AT=[2016, 2017, 2018, 2019, 2024]).loc["AT", "fdi_ok"]
+
+
+def test_non_finite_values_do_not_count_as_points():
+    ins = _inputs(_fdi_full())
+    fdi = ins[2]
+    bad = pd.DataFrame({"iso2": "FR", "year": [2022, 2023, 2024], "value": [np.nan, np.inf, np.nan]})
+    fdi = pd.concat([fdi[~((fdi.iso2 == "FR") & (fdi.year >= 2022))], bad])
+    p = q.make_panel(ins[0], ins[1], fdi, ins[3]).set_index("iso2")
+    assert np.isfinite(p.loc["FR", "fdi"])
+    assert p.loc["FR", "fdi_years"] == 2  # only 2020, 2021 are real
+    assert not p.loc["FR", "fdi_ok"]
+
+
+def test_min_points_boundary():
+    assert _panel(FR=[2016, 2017, 2022, 2023, 2024]).loc["FR", "fdi_ok"]  # exactly 3 recent
+    assert not _panel(FR=[2016, 2017, 2018, 2023, 2024]).loc["FR", "fdi_ok"]  # 2 recent
+    # year == latest-5 (2019) is outside the window: only 2020 and 2021 are recent here
+    assert not _panel(FR=[2015, 2016, 2019, 2020, 2021]).loc["FR", "fdi_ok"]
+
+
+def test_country_missing_from_feed_is_not_ok():
+    base = _fdi_full()
+    del base["DE"]
+    p = q.make_panel(*_inputs(base)).set_index("iso2")
+    assert not p.loc["DE", "fdi_ok"]
+
+
+def test_make_panel_writes_no_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(q, "DATA", tmp_path)
+    _panel()
+    assert list(tmp_path.iterdir()) == []
