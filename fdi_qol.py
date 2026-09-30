@@ -20,6 +20,7 @@ ES = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
 WB = "https://api.worldbank.org/v2"
 TOPO = "https://cdn.jsdelivr.net/npm/vega-datasets@v1.29.0/data/world-110m.json"
 SINCE = 2012
+H = 420  # plot height, shared by scatter and map so each row aligns
 SPARSE = "Sparse FDI data"
 FDI_YEARS = 5  # average FDI over last N years with data
 # FDI is "ok" (used in trend lines and tercile cuts) only if at least FDI_MIN_POINTS of the averaged
@@ -227,7 +228,7 @@ def legend_chart(name):
         x=alt.X("x:O", title="FDI  low → high", axis=alt.Axis(labels=False, ticks=False)),
         y=alt.Y("y:O", title=f"{name}  low → high", sort="descending", axis=alt.Axis(labels=False, ticks=False)),
         color=alt.Color("c:N", scale=alt.Scale(domain=list(BV), range=list(BV.values())), legend=None))
-        .properties(width=90, height=90))
+        .properties(width=120, height=120, title="Map key"))
 
 
 def panel_chart(p, topo, ycol, yname, fdi_label, pick):
@@ -247,9 +248,10 @@ def panel_chart(p, topo, ycol, yname, fdi_label, pick):
     pts = base.mark_circle(strokeWidth=2).encode(
         x=xr, y=yr,
         size=alt.Size("pop_m:Q", legend=None, scale=alt.Scale(range=[30, 500])),
-        color=alt.Color("grp:N", scale=alt.Scale(domain=dom, range=rng_), title="Bloc"),
+        color=alt.Color("grp:N", scale=alt.Scale(domain=dom, range=rng_),
+                        legend=alt.Legend(title="Bloc", orient="bottom", direction="horizontal")),
         stroke=alt.Stroke("spe:N", scale=alt.Scale(domain=["SPE hub", "other"], range=["black", "white"]),
-                          title="Pass-through hub"),
+                          legend=alt.Legend(title="Pass-through hub", orient="bottom", direction="horizontal")),
         opacity=alt.condition(pick, alt.value(0.9), alt.value(0.15)),
         tooltip=tips).add_params(pick)
     lab = base.mark_text(dy=-12, fontSize=10).encode(x=xr, y=yr, text="iso2:N",
@@ -258,8 +260,8 @@ def panel_chart(p, topo, ycol, yname, fdi_label, pick):
            .transform_regression("fdi", ycol, groupby=["group"], method="linear")
            .mark_line(strokeDash=[4, 3]).encode(
                x=xr, y=yr,
-               color=alt.Color("group:N", scale=alt.Scale(domain=dom, range=rng_), title="Bloc")))
-    scatter = (pts + lab + reg).properties(width=460, height=400, title=f"{yname} vs FDI (regression excl. hubs and grey)")
+               color=alt.Color("group:N", scale=alt.Scale(domain=dom, range=rng_), legend=None)))
+    scatter = (pts + lab + reg).properties(width=460, height=H, title=f"{yname} vs FDI (regression excl. hubs and grey)")
 
     fields = ["country", "group", "spe", "fdi", ycol, ycol_t, "pop_m", "iso2", "fdi_last_year", "fdi_years"]
     shape = alt.Chart(topo).mark_geoshape().transform_lookup(
@@ -276,9 +278,10 @@ def panel_chart(p, topo, ycol, yname, fdi_label, pick):
                  alt.Tooltip(f"{ycol}:Q", format=",.1f", title=yname),
                  alt.Tooltip("fdi_last_year:Q", format="d", title="FDI latest year"),
                  alt.Tooltip("fdi_years:Q", format="d", title="FDI years averaged")],
-    ).project(type="mercator", center=[8, 53], scale=440, translate=[260, 200]).properties(width=520, height=400,
+    ).project(type="mercator", center=[8, 54], scale=420, translate=[260, H / 2]).properties(width=520, height=H,
                                                                       title="Bivariate map (terciles)")
-    return alt.hconcat(scatter, alt.vconcat(shape, legend_chart(yname)).resolve_scale(color="independent"))
+    short = {"income": "Income", "lifesat": "Life satisfaction"}[ycol]
+    return alt.hconcat(scatter, shape, legend_chart(short)).resolve_scale(color="independent", stroke="independent")
 
 
 def main():
