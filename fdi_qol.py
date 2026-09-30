@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
 FDI vs quality of life, Europe. Builds one interactive HTML file.
-
-Run:   python fdi_qol.py            (auto: try Eurostat FDI stock, else World Bank flow)
-       python fdi_qol.py --fdi wb   (force World Bank FDI inflow proxy)
-       python fdi_qol.py --demo     (SYNTHETIC data, only to test the chart)
-
-Needs: pip install altair pandas requests numpy
-Output: data/raw_*.csv (raw), data/panel.csv (derived), fdi_qol.html
+Usage, data sources and column meanings: see README.md.
 """
 import argparse
 import sys
@@ -26,7 +20,12 @@ ES = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data"
 WB = "https://api.worldbank.org/v2"
 TOPO = "https://cdn.jsdelivr.net/npm/vega-datasets@v1.29.0/data/world-110m.json"
 SINCE = 2012
+SPARSE = "Sparse FDI data"
 FDI_YEARS = 5  # average FDI over last N years with data
+# FDI is "ok" (used in trend lines and tercile cuts) only if at least FDI_MIN_POINTS of the averaged
+# points lie in the newest FDI_YEARS calendar years of the feed. Otherwise the average is stale or
+# mixes years far apart (grey in the charts).
+FDI_MIN_POINTS = 3
 
 # name, iso2, iso numeric (map), eurostat code, group, SPE hub flag
 C = [
@@ -117,6 +116,8 @@ def worldbank(ind):
         if page >= js[0]["pages"]:
             break
         page += 1
+    if not rows:
+        raise RuntimeError(f"World Bank returned no data for {ind}")
     return pd.DataFrame(rows)
 
 
@@ -177,27 +178,39 @@ def build_demo():
     d = pd.DataFrame(rows, columns=["iso2", "fdi", "inc", "sat", "pop"])
     mk = lambda c: pd.DataFrame({"iso2": d.iso2, "year": 2023, "value": d[c]})
     fdi = pd.concat([mk("fdi").assign(year=y) for y in range(2019, 2024)])
+    # make two countries stale so the demo exercises the grey path
+    fdi = fdi[~((fdi.iso2 == "GB") & (fdi.year > 2019)) & ~((fdi.iso2 == "ME") & (fdi.year != 2020))]
     return mk("inc"), mk("sat"), fdi, mk("pop"), "SYNTHETIC DEMO FDI"
 
 
 def make_panel(income, sat, fdi, pop):
+    fdi = fdi[np.isfinite(fdi["value"])]  # NaN/inf (e.g. GDP 0) must not count as a data point
+    if fdi.empty:
+        raise RuntimeError("FDI series is empty after dropping missing values")
+    latest_year = fdi.year.max()
+    print(f"FDI feed newest year: {latest_year} (countries not reaching {FDI_MIN_POINTS} points since "
+          f"{latest_year - FDI_YEARS + 1} are grey)")
     fdi = fdi.sort_values("year").groupby("iso2").tail(FDI_YEARS)
-    f = fdi.groupby("iso2").agg(fdi=("value", "mean"), fdi_years=("year", "nunique")).reset_index()
+    fdi = fdi.assign(recent=fdi.year > latest_year - FDI_YEARS)
+    f = fdi.groupby("iso2").agg(fdi=("value", "mean"), fdi_years=("year", "nunique"),
+                                fdi_last_year=("year", "max"), n_recent=("recent", "sum")).reset_index()
+    f["fdi_ok"] = f.n_recent >= FDI_MIN_POINTS
     p = CT.merge(f, on="iso2", how="left")
     p = p.merge(latest(income).rename(columns={"value": "income", "year": "income_year"}), on="iso2", how="left")
     p = p.merge(latest(sat).rename(columns={"value": "lifesat", "year": "lifesat_year"}), on="iso2", how="left")
     p = p.merge(latest(pop).rename(columns={"value": "pop"})[["iso2", "pop"]], on="iso2", how="left")
     p["pop"] = p["pop"].fillna(p["pop"].median())
     # bivariate classes: terciles from non-hub countries
-    core = p[p.spe == "other"]
+    p["fdi_ok"] = p["fdi_ok"].fillna(False).astype(bool)
+    core = p[(p.spe == "other") & p.fdi_ok]
     for col in ("fdi", "income", "lifesat"):
         q = core[col].quantile([1 / 3, 2 / 3]).values
         p[col + "_t"] = np.where(p[col].isna(), np.nan, np.digitize(p[col], q))
+    p.loc[~p.fdi_ok, "fdi_t"] = np.nan
     for m in ("income", "lifesat"):
         ok = p["fdi_t"].notna() & p[m + "_t"].notna()
         p["cls_" + m] = np.where(ok, p["fdi_t"].fillna(0).astype(int).astype(str) + "_" +
                                  p[m + "_t"].fillna(0).astype(int).astype(str), None)
-    p.to_csv(DATA / "panel.csv", index=False)
     return p
 
 
@@ -221,41 +234,49 @@ def panel_chart(p, topo, ycol, yname, fdi_label, pick):
     d = p.copy()
     d["pop_m"] = (d["pop"] / 1e6).round(1)
     dd = d.dropna(subset=["fdi", ycol]).copy()
+    dd["grp"] = np.where(dd.fdi_ok, dd.group, SPARSE)
     ycol_t = "cls_" + ycol
-    dom, rng_ = ["West", "East"], ["#1f77b4", "#d62728"]
+    dom, rng_ = ["West", "East", SPARSE], ["#1f77b4", "#d62728", "#9e9e9e"]
     tips = ["country", "group", "spe", alt.Tooltip("fdi:Q", format=".1f", title="FDI"),
-            alt.Tooltip(f"{ycol}:Q", format=",.1f", title=yname), "pop_m"]
+            alt.Tooltip(f"{ycol}:Q", format=",.1f", title=yname), "pop_m",
+            alt.Tooltip("fdi_last_year:Q", format="d", title="FDI latest year"),
+            alt.Tooltip("fdi_years:Q", format="d", title="FDI years averaged")]
     yr = alt.Y(f"{ycol}:Q", title=yname, scale=alt.Scale(zero=False))
     xr = alt.X("fdi:Q", title=fdi_label, scale=alt.Scale(type="symlog", constant=50))
     base = alt.Chart(dd)
     pts = base.mark_circle(strokeWidth=2).encode(
         x=xr, y=yr,
         size=alt.Size("pop_m:Q", legend=None, scale=alt.Scale(range=[30, 500])),
-        color=alt.Color("group:N", scale=alt.Scale(domain=dom, range=rng_), title="Bloc"),
+        color=alt.Color("grp:N", scale=alt.Scale(domain=dom, range=rng_), title="Bloc"),
         stroke=alt.Stroke("spe:N", scale=alt.Scale(domain=["SPE hub", "other"], range=["black", "white"]),
                           title="Pass-through hub"),
         opacity=alt.condition(pick, alt.value(0.9), alt.value(0.15)),
         tooltip=tips).add_params(pick)
     lab = base.mark_text(dy=-12, fontSize=10).encode(x=xr, y=yr, text="iso2:N",
                                                      opacity=alt.condition(pick, alt.value(1), alt.value(0.15)))
-    reg = (alt.Chart(dd[dd.spe == "other"])
+    reg = (alt.Chart(dd[(dd.spe == "other") & dd.fdi_ok])
            .transform_regression("fdi", ycol, groupby=["group"], method="linear")
            .mark_line(strokeDash=[4, 3]).encode(
                x=xr, y=yr,
                color=alt.Color("group:N", scale=alt.Scale(domain=dom, range=rng_), title="Bloc")))
-    scatter = (pts + lab + reg).properties(width=460, height=400, title=f"{yname} vs FDI (regression excl. hubs)")
+    scatter = (pts + lab + reg).properties(width=460, height=400, title=f"{yname} vs FDI (regression excl. hubs and grey)")
 
-    fields = ["country", "group", "spe", "fdi", ycol, ycol_t, "pop_m", "iso2"]
-    shape = alt.Chart(topo).mark_geoshape(stroke="white", strokeWidth=0.5).transform_lookup(
+    fields = ["country", "group", "spe", "fdi", ycol, ycol_t, "pop_m", "iso2", "fdi_last_year", "fdi_years"]
+    shape = alt.Chart(topo).mark_geoshape().transform_lookup(
         lookup="id", from_=alt.LookupData(d, "iso_num", fields)
     ).encode(
         color=alt.condition(f"isValid(datum.{ycol_t})",
                             alt.Color(f"{ycol_t}:N", scale=alt.Scale(domain=list(BV), range=list(BV.values())),
                                       legend=None), alt.value("#f2f2f2")),
         opacity=alt.condition(pick, alt.value(1), alt.value(0.25)),
+        # empty=False: nothing selected -> no outline (default would outline every country)
+        stroke=alt.when(pick, empty=False).then(alt.value("black")).otherwise(alt.value("white")),
+        strokeWidth=alt.when(pick, empty=False).then(alt.value(2.5)).otherwise(alt.value(0.5)),
         tooltip=[alt.Tooltip("country:N"), alt.Tooltip("fdi:Q", format=".1f"),
-                 alt.Tooltip(f"{ycol}:Q", format=",.1f", title=yname)],
-    ).project(type="mercator", center=[14, 54], scale=560, translate=[260, 200]).properties(width=520, height=400,
+                 alt.Tooltip(f"{ycol}:Q", format=",.1f", title=yname),
+                 alt.Tooltip("fdi_last_year:Q", format="d", title="FDI latest year"),
+                 alt.Tooltip("fdi_years:Q", format="d", title="FDI years averaged")],
+    ).project(type="mercator", center=[8, 53], scale=440, translate=[260, 200]).properties(width=520, height=400,
                                                                       title="Bivariate map (terciles)")
     return alt.hconcat(scatter, alt.vconcat(shape, legend_chart(yname)).resolve_scale(color="independent"))
 
@@ -267,7 +288,9 @@ def main():
     a = ap.parse_args()
     income, sat, fdi, pop, label = build_demo() if a.demo else build_real(a.fdi)
     p = make_panel(income, sat, fdi, pop)
-    print(p[["country", "group", "fdi", "income", "income_year", "lifesat", "lifesat_year"]]
+    p.to_csv(DATA / ("panel_demo.csv" if a.demo else "panel.csv"), index=False)
+    print(p[["country", "group", "fdi", "fdi_years", "fdi_last_year", "fdi_ok", "income", "income_year",
+             "lifesat", "lifesat_year"]]
           .round(1).to_string(index=False))
     try:
         topo = alt.Data(values=requests.get(TOPO, timeout=60).json(),
@@ -280,7 +303,8 @@ def main():
     pick2 = alt.selection_point(fields=["iso2"], name="pick2")
     bot = panel_chart(p, topo, "lifesat", "Life satisfaction (0-10)", label, pick2)
     note = ("Click a bubble to highlight it on the map. Shift+click for several. "
-            "Bubble size = population. Black outline = pass-through FDI hub (excluded from trend lines and tercile cuts).")
+            "Bubble size = population. Black outline = pass-through FDI hub. "
+            "Grey = FDI data stale or sparse. Hubs and grey countries are excluded from trend lines and tercile cuts.")
     chart = alt.vconcat(top, bot).properties(
         title=alt.TitleParams("FDI vs quality of life, Europe" + (" [SYNTHETIC DEMO]" if a.demo else ""),
                               subtitle=note, anchor="start", fontSize=18))
