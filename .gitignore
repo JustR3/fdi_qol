@@ -2,3 +2,8 @@
 __pycache__/
 *.html
 data/panel_demo.csv
+
+# Local secrets (never commit)
+.env
+.env.*
+!.env.example
